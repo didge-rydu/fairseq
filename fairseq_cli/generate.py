@@ -186,6 +186,7 @@ def _main(args, output_file):
 
             # Process top predictions
             for j, hypo in enumerate(hypos[i][:args.nbest]):
+                print(tgt_dict[2])
                 hypo_tokens, hypo_str, alignment = utils.post_process_prediction(
                     hypo_tokens=hypo['tokens'].int().cpu(),
                     src_str=src_str,
@@ -193,9 +194,7 @@ def _main(args, output_file):
                     align_dict=align_dict,
                     tgt_dict=tgt_dict,
                     remove_bpe=args.remove_bpe,
-                    extra_symbols_to_ignore={
-                        generator.eos,
-                    }
+                    extra_symbols_to_ignore={}
                 )
                 detok_hypo_str = decode_fn(hypo_str)
                 if not args.quiet:

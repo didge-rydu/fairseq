@@ -42,8 +42,10 @@ def load_langpair_dataset(
     truncate_source=False, append_source_id=False
 ):
 
+    # All Im gonna say is: Im stark raving mad I had to do this to translate de -> de
+
     def split_exists(split, src, tgt, lang, data_path):
-        filename = os.path.join(data_path, '{}.{}-{}.{}'.format(split, src, tgt, lang))
+        filename = os.path.join(data_path, '{}.{}-{}.{}.{}'.format(split, src, tgt, lang, "src"))
         return indexed_dataset.dataset_exists(filename, impl=dataset_impl)
 
     src_datasets = []
@@ -63,7 +65,7 @@ def load_langpair_dataset(
             else:
                 raise FileNotFoundError('Dataset not found: {} ({})'.format(split, data_path))
 
-        src_dataset = data_utils.load_indexed_dataset(prefix + src, src_dict, dataset_impl)
+        src_dataset = data_utils.load_indexed_dataset(prefix + src + ".src", src_dict, dataset_impl)
         if truncate_source:
             src_dataset = AppendTokenDataset(
                 TruncateDataset(
@@ -74,7 +76,7 @@ def load_langpair_dataset(
             )
         src_datasets.append(src_dataset)
 
-        tgt_dataset = data_utils.load_indexed_dataset(prefix + tgt, tgt_dict, dataset_impl)
+        tgt_dataset = data_utils.load_indexed_dataset(prefix + tgt + ".tgt", tgt_dict, dataset_impl)
         if tgt_dataset is not None:
             tgt_datasets.append(tgt_dataset)
 

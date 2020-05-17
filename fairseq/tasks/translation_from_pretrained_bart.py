@@ -51,6 +51,7 @@ class TranslationFromPretrainedBARTTask(TranslationTask):
         for d in [src_dict, tgt_dict]:
             for l in self.langs:
                 d.add_symbol('[{}]'.format(l))
+            print("Lang {}, eos index: {}, eos token: {}, n words: {}, token 1: {}".format(l,d[d.eos_index],d.eos_index,len(d),d[3]))
             d.add_symbol('<mask>')
 
     def load_dataset(self, split, epoch=1, combine=False, **kwargs):

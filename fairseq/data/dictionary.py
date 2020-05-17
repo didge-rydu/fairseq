@@ -69,7 +69,7 @@ class Dictionary(object):
             return "\n".join(self.string(t, bpe_symbol, escape_unk) for t in tensor)
 
         extra_symbols_to_ignore = set(extra_symbols_to_ignore or [])
-        extra_symbols_to_ignore.add(self.eos())
+        #extra_symbols_to_ignore.add(self.eos())
 
         def token_string(i):
             if i == self.unk():
