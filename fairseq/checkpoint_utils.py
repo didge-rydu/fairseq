@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 def save_checkpoint(args, trainer, epoch_itr, val_loss):
     from fairseq import distributed_utils, meters
 
+    # only one worker should attempt to create the required dir
+    if args.distributed_rank == 0:
+        os.makedirs(args.save_dir, exist_ok=True)
+
     prev_best = getattr(save_checkpoint, "best", val_loss)
     if val_loss is not None:
         best_function = max if args.maximize_best_checkpoint_metric else min
@@ -118,9 +122,6 @@ def load_checkpoint(args, trainer, **passthrough_args):
     *passthrough_args* will be passed through to
     ``trainer.get_train_iterator``.
     """
-    # only one worker should attempt to create the required dir
-    if args.distributed_rank == 0:
-        os.makedirs(args.save_dir, exist_ok=True)
 
     suffix = getattr(args, "checkpoint_suffix", "")
     if args.restore_file == "checkpoint_last.pt":
@@ -240,20 +241,6 @@ def torch_persistent_save(*args, **kwargs):
                 logger.error(traceback.format_exc())
 
 
-def convert_state_dict_type(state_dict, ttype=torch.FloatTensor):
-    if isinstance(state_dict, dict):
-        cpu_dict = OrderedDict()
-        for k, v in state_dict.items():
-            cpu_dict[k] = convert_state_dict_type(v)
-        return cpu_dict
-    elif isinstance(state_dict, list):
-        return [convert_state_dict_type(v) for v in state_dict]
-    elif torch.is_tensor(state_dict):
-        return state_dict.type(ttype)
-    else:
-        return state_dict
-
-
 def save_state(
     filename,
     args,
@@ -273,7 +260,7 @@ def save_state(
         extra_state = {}
     state_dict = {
         "args": args,
-        "model": convert_state_dict_type(model_state_dict) if model_state_dict else {},
+        "model": model_state_dict or {},
         "optimizer_history": optim_history
         + [
             {
@@ -288,9 +275,10 @@ def save_state(
     if utils.has_parameters(criterion):
         state_dict["criterion"] = criterion.state_dict()
     if not args.no_save_optimizer_state:
-        state_dict["last_optimizer_state"] = convert_state_dict_type(
-            optimizer.state_dict()
-        )
+        state_dict["last_optimizer_state"] = optimizer.state_dict()
+
+    # convert all state to CPU
+    state_dict = utils.move_to_cpu(state_dict)
 
     with PathManager.open(filename, "wb") as f:
         torch_persistent_save(state_dict, f)

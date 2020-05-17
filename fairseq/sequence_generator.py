@@ -112,6 +112,7 @@ class SequenceGenerator(nn.Module):
         self.model.reset_incremental_state()
         return self._generate(sample, prefix_tokens, bos_token)
 
+    # TODO(myleott): unused, deprecate after pytorch-translate migration
     def generate_batched_itr(self, data_itr, beam_size=None, cuda=False, timer=None):
         """Iterate over a batched dataset and yield individual translations.
         Args:
@@ -165,13 +166,8 @@ class SequenceGenerator(nn.Module):
         prefix_tokens: Optional[Tensor] = None,
         bos_token: Optional[int] = None,
     ):
-
-        encoder_input: Dict[str, Tensor] = {}
-        for k, v in sample["net_input"].items():
-            if k != "prev_output_tokens":
-                encoder_input[k] = v
-
-        src_tokens = encoder_input["src_tokens"]
+        net_input = sample["net_input"]
+        src_tokens = net_input["src_tokens"]
         # length of the source text being the character length except EndOfSentence and pad
         src_lengths = (
             (src_tokens.ne(self.eos) & src_tokens.ne(self.pad)).long().sum(dim=1)
@@ -194,10 +190,7 @@ class SequenceGenerator(nn.Module):
             self.min_len <= max_len
         ), "min_len cannot be larger than max_len, please adjust these!"
         # compute the encoder output for each beam
-        encoder_outs = self.model.forward_encoder(
-            src_tokens=encoder_input["src_tokens"],
-            src_lengths=encoder_input["src_lengths"],
-        )
+        encoder_outs = self.model.forward_encoder(net_input)
 
         # placeholder of indices for bsz * beam_size to hold tokens and accumulative scores
         new_order = torch.arange(bsz).view(-1, 1).repeat(1, beam_size).view(-1)
@@ -461,7 +454,7 @@ class SequenceGenerator(nn.Module):
         prefix_lprobs = lprobs.gather(-1, prefix_toks.unsqueeze(-1))
         prefix_mask = prefix_toks.ne(self.pad)
         lprobs[prefix_mask] = torch.tensor(-math.inf).to(lprobs)
-        lprobs[prefix_mask] = lprobs[prefix_mask].scatter_(
+        lprobs[prefix_mask] = lprobs[prefix_mask].scatter(
             -1, prefix_toks[prefix_mask].unsqueeze(-1), prefix_lprobs[prefix_mask]
         )
         # if prefix includes eos, then we should make sure tokens and
@@ -600,44 +593,60 @@ class SequenceGenerator(nn.Module):
             return True
         return False
 
-    @torch.jit.unused
+    def calculate_banned_tokens(
+        self,
+        tokens,
+        step: int,
+        gen_ngrams: List[Dict[str, List[int]]],
+        no_repeat_ngram_size: int,
+        bbsz_idx: int,
+    ):
+        tokens_list: List[int] = tokens[
+            bbsz_idx, step + 2 - no_repeat_ngram_size : step + 1
+        ].tolist()
+        # before decoding the next token, prevent decoding of ngrams that have already appeared
+        ngram_index = ",".join([str(x) for x in tokens_list])
+        return gen_ngrams[bbsz_idx].get(ngram_index, torch.jit.annotate(List[int], []))
+
+    def transpose_list(self, l: List[List[int]]):
+        # GeneratorExp aren't supported in TS so ignoring the lint
+        min_len = min([len(x) for x in l])  # noqa
+        l2 = [[row[i] for row in l] for i in range(min_len)]
+        return l2
+
     def _no_repeat_ngram(self, tokens, lprobs, bsz: int, beam_size: int, step: int):
         # for each beam and batch sentence, generate a list of previous ngrams
-        gen_ngrams = [{} for bbsz_idx in range(bsz * beam_size)]
+        gen_ngrams: List[Dict[str, List[int]]] = [
+            torch.jit.annotate(Dict[str, List[int]], {})
+            for bbsz_idx in range(bsz * beam_size)
+        ]
         cpu_tokens = tokens.cpu()
         for bbsz_idx in range(bsz * beam_size):
-            gen_tokens = cpu_tokens[bbsz_idx].tolist()
-            for ngram in zip(
-                *[gen_tokens[i:] for i in range(self.no_repeat_ngram_size)]
+            gen_tokens: List[int] = cpu_tokens[bbsz_idx].tolist()
+            for ngram in self.transpose_list(
+                [gen_tokens[i:] for i in range(self.no_repeat_ngram_size)]
             ):
-                if ngram[-1] != self.pad:
-                    gen_ngrams[bbsz_idx][tuple(ngram[:-1])] = gen_ngrams[bbsz_idx].get(
-                        tuple(ngram[:-1]), []
-                    ) + [ngram[-1]]
+                key = ",".join([str(x) for x in ngram[:-1]])
+                gen_ngrams[bbsz_idx][key] = gen_ngrams[bbsz_idx].get(
+                    key, torch.jit.annotate(List[int], [])
+                ) + [ngram[-1]]
 
-        def calculate_banned_tokens(bbsz_idx):
-            # before decoding the next token, prevent decoding of ngrams that have already appeared
-            ngram_index = tuple(
-                cpu_tokens[
-                    bbsz_idx, step + 2 - self.no_repeat_ngram_size : step + 1
-                ].tolist()
-            )
-            banned_tokens_per_sample = gen_ngrams[bbsz_idx].get(ngram_index, [])
-            banned_tokens_per_sample = [(bbsz_idx, t) for t in banned_tokens_per_sample]
-            return banned_tokens_per_sample
-
-        banned_tokens = []
         if step + 2 - self.no_repeat_ngram_size >= 0:
             # no banned tokens if we haven't generated no_repeat_ngram_size tokens yet
-            for bbsz_idx in range(bsz * beam_size):
-                banned_tokens.extend(calculate_banned_tokens(bbsz_idx))
-
-        if banned_tokens:
-            banned_tokens = torch.LongTensor(banned_tokens)
-            lprobs.index_put_(
-                tuple(banned_tokens.t()),
-                lprobs.new_tensor([-math.inf] * len(banned_tokens)),
-            )
+            banned_tokens = [
+                self.calculate_banned_tokens(
+                    tokens, step, gen_ngrams, self.no_repeat_ngram_size, bbsz_idx
+                )
+                for bbsz_idx in range(bsz * beam_size)
+            ]
+        else:
+            banned_tokens = [
+                torch.jit.annotate(List[int], []) for bbsz_idx in range(bsz * beam_size)
+            ]
+        for bbsz_idx in range(bsz * beam_size):
+            lprobs[bbsz_idx][
+                torch.tensor(banned_tokens[bbsz_idx]).long()
+            ] = torch.tensor(-math.inf, dtype=torch.float)
         return lprobs
 
 
@@ -691,11 +700,11 @@ class EnsembleModel(nn.Module):
         return min([m.max_decoder_positions() for m in self.models])
 
     @torch.jit.export
-    def forward_encoder(self, src_tokens, src_lengths):
+    def forward_encoder(self, net_input: Dict[str, Tensor]):
         if not self.has_encoder():
             return None
         return [
-            model.encoder(src_tokens=src_tokens, src_lengths=src_lengths)
+            model.encoder.forward_torchscript(net_input)
             for model in self.models
         ]
 
